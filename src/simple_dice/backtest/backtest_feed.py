@@ -19,7 +19,7 @@ class OpenFundCsvData(GenericCSVData):
         ('nullvalue', 0.0),
         ('dtformat', '%Y-%m-%d'),
         ('datetime', 0),
-        ('open', -1),
+        ('open', 1),
         ('high', -1),
         ('low', -1),
         ('close', 1),

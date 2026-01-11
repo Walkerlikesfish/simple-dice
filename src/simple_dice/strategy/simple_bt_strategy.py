@@ -1,41 +1,91 @@
 import calendar
-
+import datetime
+import os.path
+import time
 import backtrader as bt
 
 
-class MyStrategy(bt.Strategy):
-    params = (('printlog', False), )
+# A test strategy
+class TestStrategy(bt.Strategy):
+    params = (('volume_per_trade', 2500), )
 
-    def log(self, txt, dt=None, doprint=False):
-        if self.params.printlog or doprint:
-            dt = dt or self.datas[0].datetime.date(0)
-            print('%s, %s' % (dt.isoformat(), txt))
+    def log(self, txt, dt=None):
+        ''' Logging function fot this strategy'''
+        dt = dt or self.datas[0].datetime.date(0)
+        print('%s, %s' % (dt.isoformat(), txt))
 
     def __init__(self):
-        pass
+        # Keep a reference to the "close" line in the data[0] dataseries
+        self.dataclose = self.datas[0].close
 
-    def next(self):
-        pass
+        # To keep track of pending orders
+        self.order = None
+        self.buy_date = None
+        self.buy_queue = []
+        self.sma = bt.indicators.SMA(self.dataclose, period=7)
 
-    def stop(self):
-        pass
+    def calculate_sell_commission(self, sell_price):
+        dt = self.datas[0].datetime.date(0)
+        commission = 0
+        for buy_date, buy_size, _ in self.buy_queue:
+            days = (dt - buy_date).days
+            if days < 7:
+                comm_rate = 0.015
+            elif days < 30:
+                comm_rate = 0.005
+            else:
+                comm_rate = 0.0
+            commission += buy_size * sell_price * comm_rate
+        return commission
 
     def notify_order(self, order):
+        dt = self.datas[0].datetime.date(0)
         if order.status in [order.Submitted, order.Accepted]:
+            # Buy/Sell order submitted/accepted to/by broker - Nothing to do
             return
 
+        # Check if an order has been completed
+        # Attention: broker could reject order if not enough cash
         if order.status in [order.Completed]:
             if order.isbuy():
                 self.log(
-                    f'执行买入，{order.data._name}，价格：{order.executed.price:.2f}，花费：{order.executed.value:.2f}，手续费：{order.executed.comm:.2f}'
-                )
+                    'BUY EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                    (order.executed.price,
+                     order.executed.value,
+                     order.executed.comm))
 
-            else:
-                self.log(
-                    f'执行卖出，{order.data._name}，价格：{order.executed.price:.2f}，花费：{order.executed.value:.2f}，手续费：{order.executed.comm:.2f}'
-                )
+                self.buyprice = order.executed.price
+                self.buycomm = order.executed.comm
+                self.buy_date = dt
+                self.buy_queue.append((dt, order.executed.size, order.executed.price))
+            else:  # Sell
+                commission = 0
+                sold_size = order.executed.size
+                price = order.executed.price
+                while sold_size > 0 and self.buy_queue:
+                    buy_date, buy_size, _ = self.buy_queue[0]
+                    sell_portion = min(buy_size, sold_size)
+                    days = (dt - buy_date).days
+                    if days < 7:
+                        comm_rate = 0.015
+                    elif days < 30:
+                        comm_rate = 0.005
+                    else:
+                        comm_rate = 0.0
+                    commission += sell_portion * price * comm_rate
+                    if sell_portion >= buy_size:
+                        self.buy_queue.pop(0)
+                    else:
+                        self.buy_queue[0] = (buy_date, buy_size - sell_portion, self.buy_queue[0][2])
+                    sold_size -= sell_portion
+                self.broker.add_cash(-commission)
+                self.log('SELL EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                         (order.executed.price,
+                          order.executed.value,
+                          commission))
+
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            self.log('交易取消、保证金不足、交易被拒绝')
+            self.log('Order Canceled/Margin/Rejected')
 
         self.order = None
 
@@ -43,41 +93,61 @@ class MyStrategy(bt.Strategy):
         if not trade.isclosed:
             return
 
-        self.log(f'营业利润，毛利润：{trade.pnl:.2f}，净利润：{trade.pnlcomm:.2f}')
-
-
-"""
-实现富国中证 500 定投，如果跌幅达到 2% 则买入
-"""
-
-
-class DeclineStrategy(bt.Strategy):
-    params = (('decline', -2.0), )
-
-    def log(self, txt, dt=None):
-        dt = dt or self.datas[0].datetime.date(0)
-        print('%s, %s' % (dt.isoformat(), txt))
-
-    def __init__(self):
-        self.dataprice = self.datas[0].close
-        self.rate = self.datas[0].volume
+        self.log('OPERATION PROFIT, GROSS %.2f, NET %.2f' %
+                 (trade.pnl, trade.pnlcomm))
+    
 
     def next(self):
-        print(self.rate[0])
-        if self.rate[0] <= self.params.decline or (
-                self.rate[0] + self.rate[-1]) <= self.params.decline:
-            buy_size = round(250 / self.dataprice[0], 2)
-            print(buy_size)
-            self.buy(size=buy_size)
+        # Simply log the closing price of the series from the reference
+        self.log(f'Close: {self.dataclose[0]:.2f}, Current position size: {self.position.size}')
 
+        # Check if an order is pending ... if yes, we cannot send a 2nd one
+        if self.order:
+            return
 
-"""
-实现在每周的一天进行定投
-"""
+        # Buy policy: when signal shows, buy for 6 days (signal + 5 more)
+        if len(self) > 7:
+            decline = (self.sma[0] - self.sma[-7]) / self.sma[-7]
+            if decline < -0.005 and not hasattr(self, 'buy_counter'):
+                self.buy_counter = 6
+                self.buy_start_ma = self.sma[0]
+            if hasattr(self, 'buy_counter') and self.buy_counter > 0 and self.sma[0] <= self.buy_start_ma * 1.005:
+                buy_size = round(self.params.volume_per_trade / self.dataclose[0], 2)
+                self.log('BUY CREATE, %.2f' % self.dataclose[0])
+                self.order = self.buy(size=buy_size)
+                self.buy_counter -= 1
+                if self.buy_counter == 0:
+                    delattr(self, 'buy_counter')
+                    delattr(self, 'buy_start_ma')
+
+        # Sell policy: if >0.8% net gain after commission, sell all
+        if self.position.size > 0:
+            sell_value = self.dataclose[0] * self.position.size
+            commission = self.calculate_sell_commission(self.dataclose[0])
+            total_cost = sum(buy_size * buy_price for _, buy_size, buy_price in self.buy_queue)
+            if total_cost > 0:
+                net_gain = sell_value - commission - total_cost
+                if net_gain / total_cost > 0.008:
+                    self.log(f'SELL ALL CREATE due to >0.8% net gain, {self.dataclose[0]}')
+                    self.order = self.sell(size=self.position.size)
+                    # return  # sell all, skip other policies
+
+        # # Sell policy: when signal shows, sell for 6 days
+        # if self.position and len(self) > 7:
+        #     increase = (self.sma[0] - self.sma[-7]) / self.sma[-7]
+        #     if increase > 0.01 and not hasattr(self, 'sell_counter'):
+        #         self.sell_counter = 6
+        #     if hasattr(self, 'sell_counter') and self.sell_counter > 0:
+        #         sell_size = self.position.size / self.sell_counter
+        #         self.log('SELL CREATE, %.2f' % self.dataclose[0])
+        #         self.order = self.sell(size=sell_size)
+        #         self.sell_counter -= 1
+        #         if self.sell_counter == 0:
+        #             delattr(self, 'sell_counter')
 
 
 class WeekStrategy(bt.Strategy):
-    params = (('weeknum', 3), )
+    params = (('weeknum', 3), ('volume_per_trade', 2500), )
 
     def weekday(self, date):
         date_time = date
@@ -90,204 +160,40 @@ class WeekStrategy(bt.Strategy):
 
     def __init__(self):
         self.dataprice = self.datas[0].close
+        self.dataclose = self.datas[0].close
 
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            # Buy/Sell order submitted/accepted to/by broker - Nothing to do
+            return
+
+        # Check if an order has been completed
+        # Attention: broker could reject order if not enough cash
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(
+                    'BUY EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                    (order.executed.price,
+                     order.executed.value,
+                     order.executed.comm))
+
+                self.buyprice = order.executed.price
+                self.buycomm = order.executed.comm
+            else:  # Sell
+                self.log('SELL EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                         (order.executed.price,
+                          order.executed.value,
+                          order.executed.comm))
+
+            self.bar_executed = len(self)
+
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order Canceled/Margin/Rejected')
+
+        self.order = None
+    
     def next(self):
         if self.weekday(self.datas[0].datetime.date(0)) == self.params.weeknum:
-            buy_size = round(250 / self.dataprice[0], 2)
+            buy_size = round(self.params.volume_per_trade / self.dataprice[0], 2)
+            self.log('BUY CREATE, %.2f' % self.dataclose[0])
             self.buy(size=buy_size)
-
-
-"""
-动量钟摆策略
-"""
-
-
-class MomOscStrategy(MyStrategy):
-    params = (
-        ('period', 20),
-        ('printlog', True),
-    )
-
-    def __init__(self):
-        self.dataprice = self.datas[0].close
-        self.order = None
-        self.month = -1
-        self.mom = [
-            bt.indicators.MomentumOscillator(i, period=self.params.period)
-            for i in self.datas
-        ]
-
-    def next(self):
-        buy_id = 999
-
-        c = [i.momosc[0] for i in self.mom]
-        [self.log(f'{self.datas[c.index(i)]._name}, {i}') for i in c]
-
-        value, value1, value2 = map(lambda x: x, c)
-        index, value = c.index(max(c)), max(c)
-
-        if value > 100:
-            buy_id = index
-
-        if value > 100 and value1 > 100 and value2 > 100:
-            buy_id = 888
-
-        for i in range(0, len(c)):
-
-            if buy_id != 888 and i != buy_id:
-                position_size = self.broker.getposition(
-                    data=self.datas[i]).size
-                if position_size != 0:
-                    self.order_target_percent(data=self.datas[i], target=0)
-
-        if buy_id != 999 and buy_id != 888:
-            position_size = self.broker.getposition(
-                data=self.datas[buy_id]).size
-            if position_size == 0:
-                self.order_target_percent(data=self.datas[buy_id], target=0.98)
-
-    def stop(self):
-        return_all = self.broker.getvalue() / 200000.0
-        print('{0}, {1}%, {2}%'.format(
-            self.params.period, round((return_all - 1.0) * 100, 2),
-            round((pow(return_all, 1.0 / 8) - 1.0) * 100, 2)))
-
-
-class MomStrategy(MyStrategy):
-    params = (
-        ('period', 20),
-        ('printlog', True),
-    )
-
-    def __init__(self):
-        self.dataprice = self.datas[0].close
-        self.order = None
-        self.month = -1
-        self.mom = [
-            bt.indicators.Momentum(i, period=self.params.period)
-            for i in self.datas
-        ]
-
-    def next(self):
-        buy_id = 999
-
-        c = [
-            i.momentum[0]  #/ (i.datas[0].close + i.datas[0].open) * 2
-            for i in self.mom
-        ]
-        index, value = c.index(max(c)), max(c)
-        [self.log(f'{self.datas[c.index(i)]._name}, {i}') for i in c]
-        if value > 0:
-            buy_id = index
-
-        for i in range(0, len(c)):
-            if i != buy_id:
-                position_size = self.broker.getposition(
-                    data=self.datas[i]).size
-                if position_size != 0:
-                    self.order_target_percent(data=self.datas[i], target=0)
-
-        if buy_id != 999:
-            position_size = self.broker.getposition(
-                data=self.datas[buy_id]).size
-            if position_size == 0:
-                self.order_target_percent(data=self.datas[buy_id], target=0.98)
-
-    def stop(self):
-        return_all = self.broker.getvalue() / 200000.0
-        print('{0}, {1}%, {2}%'.format(
-            self.params.period, round((return_all - 1.0) * 100, 2),
-            round((pow(return_all, 1.0 / 8) - 1.0) * 100, 2)))
-
-
-class BBandStrategy(bt.Strategy):
-    params = (('period', 20), )
-
-    def __init__(self):
-        self.dataprice = self.datas[0].close
-        self.order = None
-        self.month = -1
-        self.bbandPcts = [
-            bt.indicators.BollingerBandsPct(i, period=self.params.period)
-            for i in self.datas
-        ]
-
-    def next(self):
-        buy_id = 0
-
-        c = [i.pctb[0] for i in self.bbandPcts]
-        index, value = c.index(max(c)), max(c)
-
-        if value > 0:
-            buy_id = index
-
-        for i in range(0, len(c)):
-            if i != buy_id:
-                position_size = self.broker.getposition(
-                    data=self.datas[i]).size
-                if position_size != 0:
-                    self.order_target_percent(data=self.datas[i], target=0)
-
-        position_size = self.broker.getposition(data=self.datas[buy_id]).size
-        if position_size == 0:
-            self.order_target_percent(data=self.datas[buy_id], target=0.98)
-
-    def stop(self):
-        return_all = self.broker.getvalue() / 200000.0
-        print('{0}, {1}%, {2}%'.format(
-            self.params.period, round((return_all - 1.0) * 100, 2),
-            round((pow(return_all, 1.0 / 8) - 1.0) * 100, 2)))
-
-
-class BBandMomoscStrategy(MyStrategy):
-    """
-    先找到动量最好的一支，然后判断，如果跌破布林下线则买入，跌破中线买入一半，从中线上涨到上线则卖出二分之一，从下线上涨到布林中线卖出二分之一。
-    """
-
-    params = (
-        ('period', 20),
-        ('printlog', True),
-    )
-
-    def __init__(self):
-        self.dataprice = [i.close for i in self.datas]
-        self.order = None
-        self.mom = [
-            bt.indicators.MomentumOscillator(i, period=self.params.period)
-            for i in self.datas
-        ]
-
-        self.bbandPcts = [
-            bt.indicators.BollingerBandsPct(i, period=self.params.period)
-            for i in self.datas
-        ]
-
-    def next(self):
-        buy_id = 0
-
-        momosc = [i.momosc[0] for i in self.mom]
-        top = [i.top[0] for i in self.bbandPcts]
-        mid = [i.mid[0] for i in self.bbandPcts]
-        bot = [i.bot[0] for i in self.bbandPcts]
-        pctb = [i.pctb[0] for i in self.bbandPcts]
-        index, value = momosc.index(max(momosc)), max(momosc)
-
-        if value > 100:
-            buy_id = index
-
-        for i in range(0, len(momosc)):
-            if i != buy_id:
-                position_size = self.broker.getposition(
-                    data=self.datas[i]).size
-                if position_size != 0:
-                    self.order_target_percent(data=self.datas[i], target=0)
-
-        position_size = self.broker.getposition(data=self.datas[buy_id]).size
-        if position_size == 0 and self.dataprice[buy_id] < bot[buy_id]:
-            self.order_target_percent(data=self.datas[buy_id], target=0.98)
-
-    def stop(self):
-        return_all = self.broker.getvalue() / 200000.0
-        print('{0}, {1}%, {2}%'.format(
-            self.params.period, round((return_all - 1.0) * 100, 2),
-            round((pow(return_all, 1.0 / 8) - 1.0) * 100, 2)))

@@ -70,7 +70,7 @@ def download_open_fund():
     广发价值领先混合 008099
     富国中证 500 指数 161017
     """
-    fund_list = ['161017', '002943', '008099']
+    fund_list = ['161017', '007950', '013811']
     for fund in fund_list:
         get_open_fund_info(fund_code=fund)
 
