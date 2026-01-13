@@ -211,3 +211,5 @@ __marimo__/
 tmp**
 scripts/tmp**
 datas/**.csv
+datas/**.png
+datas/**.jpg

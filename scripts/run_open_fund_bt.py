@@ -8,18 +8,22 @@ import backtrader.analyzers as btanalyzers
 
 if __name__ == '__main__':
     cerebro = bt.Cerebro()
-    start_date = datetime.datetime(2025, 10, 2)
+    start_date = datetime.datetime(2024,12, 30)
     end_date = datetime.datetime(2026, 1, 9)
 
-    data = OpenFundCsvData(dataname=r'../datas/013811.csv',
+    data = OpenFundCsvData(dataname=r'../datas/161017.csv',
                            fromdate=start_date,
                            todate=end_date,)
     
     cerebro.adddata(data)
-    cerebro.addstrategy(TestStrategy, volume_per_trade=2000) # WeekStrategy, TestStrategy
+    cerebro.addstrategy(TestStrategy, volume_per_trade=4000) # WeekStrategy, TestStrategy
+    
+    # Add observers to plot buy/sell signals
+    cerebro.addobserver(bt.observers.BuySell)
+    cerebro.addobserver(bt.observers.Trades)
     
 
-    init_cash = 100000.00
+    init_cash = 10 * 10000.00
     cerebro.broker.setcash(init_cash)
     cerebro.broker.setcommission(commission=0.0)
     
@@ -42,4 +46,4 @@ if __name__ == '__main__':
     # print('Annual Return:', strat.analyzers.annualreturn.get_analysis())
     # print(f"Used Cash: {used_cash}\nCurrent Cash: {cerebro.broker.get_cash()}\nReturn: {return_all}, ROI: {roi}%")
 
-    # cerebro.plot()
+    cerebro.plot()

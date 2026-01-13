@@ -2,12 +2,13 @@ import calendar
 import datetime
 import os.path
 import time
+import pandas as pd
 import backtrader as bt
 
 
 # A test strategy
 class TestStrategy(bt.Strategy):
-    params = (('volume_per_trade', 2500), )
+    params = (('volume_per_trade', 2500), ('asset_reference', 'D:\workspace\simple-dice\datas\\013811_revenues.csv'), )
 
     def log(self, txt, dt=None):
         ''' Logging function fot this strategy'''
@@ -23,6 +24,23 @@ class TestStrategy(bt.Strategy):
         self.buy_date = None
         self.buy_queue = []
         self.sma = bt.indicators.SMA(self.dataclose, period=7)
+        self.reference = pd.read_csv(self.params.asset_reference, index_col=0, parse_dates=True)
+
+        # Get basic stats for each revenue column
+        self.ref_stats = {}
+        for col in ['revenue_5d', 'revenue_14d', 'revenue_30d', 'revenue_90d', 'revenue_300d']:
+            series = self.reference[col].dropna()
+            self.ref_stats[col] = {
+                'count': len(series),
+                'mean': series.mean(),
+                'std': series.std(),
+                'min': series.min(),
+                '25th': series.quantile(0.25),
+                '50th': series.quantile(0.5),
+                '75th': series.quantile(0.75),
+                'max': series.max(),
+            }
+            self.log(f"Stats for {col}: {self.ref_stats[col]}")
 
     def calculate_sell_commission(self, sell_price):
         dt = self.datas[0].datetime.date(0)
@@ -105,32 +123,38 @@ class TestStrategy(bt.Strategy):
         if self.order:
             return
 
-        # Buy policy: when signal shows, buy for 6 days (signal + 5 more)
-        if len(self) > 7:
-            decline = (self.sma[0] - self.sma[-7]) / self.sma[-7]
-            if decline < -0.005 and not hasattr(self, 'buy_counter'):
-                self.buy_counter = 6
-                self.buy_start_ma = self.sma[0]
-            if hasattr(self, 'buy_counter') and self.buy_counter > 0 and self.sma[0] <= self.buy_start_ma * 1.005:
-                buy_size = round(self.params.volume_per_trade / self.dataclose[0], 2)
-                self.log('BUY CREATE, %.2f' % self.dataclose[0])
-                self.order = self.buy(size=buy_size)
-                self.buy_counter -= 1
-                if self.buy_counter == 0:
-                    delattr(self, 'buy_counter')
-                    delattr(self, 'buy_start_ma')
+        # Calculate past 7 days window delta
+        if len(self) > 6:
+            delta_7d = self.dataclose[0] - self.dataclose[-6]
+            self.log(f'7d delta: {delta_7d:.4f}')
 
-        # Sell policy: if >0.8% net gain after commission, sell all
-        if self.position.size > 0:
-            sell_value = self.dataclose[0] * self.position.size
-            commission = self.calculate_sell_commission(self.dataclose[0])
-            total_cost = sum(buy_size * buy_price for _, buy_size, buy_price in self.buy_queue)
-            if total_cost > 0:
-                net_gain = sell_value - commission - total_cost
-                if net_gain / total_cost > 0.008:
-                    self.log(f'SELL ALL CREATE due to >0.8% net gain, {self.dataclose[0]}')
-                    self.order = self.sell(size=self.position.size)
-                    # return  # sell all, skip other policies
+        # Calculate past 7 days window delta
+        if len(self) > 6:
+            delta_7d = self.dataclose[0] - self.dataclose[-6]
+            self.log(f'7d delta: {delta_7d:.4f}')
+
+            # Buy policy: map delta_7d proportionally to 14,30,90,300 days and check if below 50th for all
+            buy_signal = True
+            for W in [14, 30, 90, 300]:
+                scaled_delta = delta_7d * (W / 7)
+                if scaled_delta >= self.ref_stats[f'revenue_{W}d']['50th']:
+                    buy_signal = False
+                    break
+            if buy_signal:
+                buy_size = round(self.params.volume_per_trade / self.dataclose[0], 2)
+                self.log('BUY CREATE based on scaled delta below 50th for all windows, %.2f' % self.dataclose[0])
+                self.order = self.buy(size=buy_size)
+
+            # Sell policy: if delta_7d above 75th percentile and position profitable after commission, sell all
+            if self.position.size > 0 and delta_7d > self.ref_stats['revenue_14d']['75th']:
+                sell_value = self.dataclose[0] * self.position.size
+                commission = self.calculate_sell_commission(self.dataclose[0])
+                total_cost = sum(buy_size * buy_price for _, buy_size, buy_price in self.buy_queue)
+                if total_cost > 0:
+                    net_gain = sell_value - commission - total_cost
+                    if net_gain > 0:
+                        self.log(f'SELL ALL CREATE due to delta above 75th and positive net gain, {self.dataclose[0]}')
+                        self.order = self.sell(size=self.position.size)
 
         # # Sell policy: when signal shows, sell for 6 days
         # if self.position and len(self) > 7:
