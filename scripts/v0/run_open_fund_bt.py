@@ -1,3 +1,4 @@
+import os
 import datetime
 from simple_dice.backtest.backtest_feed import OpenFundCsvData, ETFCsvData
 from simple_dice.strategy.simple_bt_strategy import TestStrategy, WeekStrategy
@@ -5,13 +6,15 @@ from simple_dice.strategy.simple_bt_strategy import TestStrategy, WeekStrategy
 import backtrader as bt
 import backtrader.analyzers as btanalyzers
 
+DATA_DIR = '/Users/yuliu/Documents/workspace/data/dice_data/open_fund/'
+os.makedirs(DATA_DIR, exist_ok=True)
 
 if __name__ == '__main__':
     cerebro = bt.Cerebro()
     start_date = datetime.datetime(2024,12, 30)
     end_date = datetime.datetime(2026, 1, 9)
 
-    data = OpenFundCsvData(dataname=r'../datas/161017.csv',
+    data = OpenFundCsvData(dataname=os.path.join(DATA_DIR, '161017.csv'),
                            fromdate=start_date,
                            todate=end_date,)
     

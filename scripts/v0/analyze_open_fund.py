@@ -3,15 +3,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 # Plan
 
-# 1. Read a CSV file containing open fund data into a pandas DataFrame.
-# the csv file include 3 cols
-# an example showed below
-# datetime,open,rate
-# 2021-10-20,1.0,0.0
-# 2021-10-22,0.9999,0.0
-# 2021-10-26,0.9999,0.0
-# 2021-10-27,0.9933,-0.66
-
 def read_open_fund_csv(file_path: str):
     df = pd.read_csv(file_path)
     df['datetime'] = pd.to_datetime(df['datetime'])
