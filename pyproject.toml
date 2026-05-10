@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-dice"
+version = "0.1.0"
+description = "Backtrader-based open fund backtesting"
+readme = "readme.md"
+authors = [
+    {name = "Yu Liu / Walker", email = "walkerlikefish@gmail.com"},
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "backtrader",
+    "backtrader_plotting",
+    "pandas",
+    "matplotlib",
+    "akshare",
+    "numpy",
+    "requests",
+    "scipy",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
